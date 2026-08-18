@@ -1,0 +1,1904 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AfterChat</title>
+</head>
+<body>
+
+<script type="module">
+  import { Client, handle_file } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
+  window.AfterChatGradio = { Client, handle_file };
+</script>
+
+<script>
+(() => {
+  const DB_NAME = "afterchat-local-0.4";
+  const STORE_NAME = "kv";
+
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains(STORE_NAME)) {
+          req.result.createObjectStore(STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function kvGet(key) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).get(key);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function kvSet(key, value) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(value, key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function kvDelete(key) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(key);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function blobToDataUrl(blob) {
+    if (!blob) return null;
+    if (typeof blob === "string") return blob;
+    if (blob.dataUrl) return blob.dataUrl;
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("No se pudo leer la imagen."));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function normalizeInput(input) {
+    const parts = [];
+    if (typeof input === "string") return { text: input, images: [] };
+    if (Array.isArray(input)) {
+      for (const item of input) {
+        if (typeof item === "string") parts.push(item);
+        else if (item instanceof Blob) parts.push({ image: await blobToDataUrl(item) });
+        else if (item && typeof item === "object") {
+          if (item.instruction) {
+            if (Array.isArray(item.instruction)) {
+              for (const x of item.instruction) {
+                if (typeof x === "string") parts.push(x);
+                else if (x instanceof Blob) parts.push({ image: await blobToDataUrl(x) });
+              }
+            } else parts.push(item.instruction);
+          }
+          if (item.prompt) parts.push(item.prompt);
+        }
+      }
+      return { text: parts.filter(x => typeof x === "string").join("\n"), images: parts.filter(x => x && x.image).map(x => x.image) };
+    }
+    if (input && typeof input === "object") {
+      const instruction = input.instruction ?? input.prompt ?? "";
+      if (Array.isArray(instruction)) {
+        for (const x of instruction) {
+          if (typeof x === "string") parts.push(x);
+          else if (x instanceof Blob) parts.push({ image: await blobToDataUrl(x) });
+        }
+      } else if (instruction) parts.push(instruction);
+      if (input.image instanceof Blob) parts.push({ image: await blobToDataUrl(input.image) });
+      return { text: parts.filter(x => typeof x === "string").join("\n"), images: parts.filter(x => x && x.image).map(x => x.image) };
+    }
+    return { text: "", images: [] };
+  }
+
+  function makeAbortable(promise) {
+    let stopped = false;
+    const wrapped = promise.then(value => stopped ? { text: "", generatedText: "" } : value);
+    wrapped.stop = () => { stopped = true; };
+    return wrapped;
+  }
+
+  async function generateText(input) {
+    if (input && input.getMetaObject) {
+      return {
+        countTokens: () => 0,
+        idealMaxContextTokens: 100000
+      };
+    }
+
+    const normalized = await normalizeInput(input);
+    const request = (async () => {
+      const space = localStorage.getItem("afterchat_hf_space") || "TU_USUARIO/afterchat-ai";
+      if (space.includes("TU_USUARIO")) {
+        throw new Error("Configura primero tu Space de Hugging Face en localStorage con la clave afterchat_hf_space.");
+      }
+      if (!window.AfterChatGradio?.Client) {
+        throw new Error("No se pudo cargar el cliente de Hugging Face. Recarga la página.");
+      }
+      const client = await window.AfterChatGradio.Client.connect(space);
+      let image = null;
+      if (normalized.images?.[0]) image = await window.AfterChatGradio.handle_file(normalized.images[0]);
+      const result = await client.predict("/chat", [normalized.text || "", image]);
+      const text = Array.isArray(result?.data) ? (result.data[0] || "") : (result?.data || "");
+      return { text: String(text), generatedText: String(text) };
+    })();
+
+    return makeAbortable(request);
+  }
+
+  async function generateImage() {
+    throw new Error("La generación de imágenes todavía no está migrada al backend.");
+  }
+
+  window.root = {
+    kv: {
+      memorial: { get: kvGet, set: kvSet, delete: kvDelete }
+    },
+    generateText,
+    generateImage,
+    superFetch: (...args) => fetch(...args)
+  };
+
+  const style = document.createElement("style");
+  style.textContent = "[hidden]{display:none !important}";
+  document.head.appendChild(style);
+})();
+</script>
+
+<div id="appFrame">
+
+  <div id="appHeader" class="wa-header">
+    <span class="t">Recuerdos Vivos</span>
+    <span>
+      <button class="h-icon" onclick="showTab('voice')">🎤</button>
+      <button class="h-icon" onclick="showTab('chat')">💬</button>
+      <button class="h-icon">⋮</button>
+    </span>
+  </div>
+
+  <div id="chatHeader" class="wa-header ch" hidden>
+    <button class="back" onclick="showTab('profile')">‹</button>
+    <img id="chatAvatarImg" class="avatar" alt="" hidden onclick="openLightbox()">
+    <span id="chatAvatarPh" class="avatar" onclick="openLightbox()">👤</span>
+    <div class="h-info" onclick="showTab('contact')">
+      <div id="chatNameEl" class="h-name">Conversación</div>
+      <div id="chatStatusEl" class="h-status">en línea</div>
+    </div>
+    <button class="h-icon" onclick="showTab('contact')" title="Info. de contacto">ⓘ</button>
+    <button id="autoVoiceBtn" class="h-icon" onclick="toggleAuto()" title="Voz automática">🔇</button>
+  </div>
+
+  <div id="contactHeader" class="wa-header" hidden>
+    <button class="back" onclick="showTab('chat')">‹</button>
+    <span class="t">Info. de contacto</span>
+  </div>
+
+  <!-- ============ PERFIL ============ -->
+  <section id="tab-profile" class="panel">
+    <div class="profile-top">
+      <label id="photoLabel" class="avatar-big" for="photoInput">
+        <img id="profileImg" alt="" hidden>
+        <span id="photoPh" class="ph">Añadir foto</span>
+        <span class="badge">📷</span>
+      </label>
+      <input id="photoInput" type="file" accept="image/*" hidden>
+      <p class="dim">Toca para añadir una foto de la persona</p>
+    </div>
+    <div class="wa-row">
+      <label for="nameInput">Nombre</label>
+      <input id="nameInput" type="text" placeholder="Nombre de la persona">
+    </div>
+    <div class="wa-row">
+      <label for="phoneInput">Número de teléfono</label>
+      <input id="phoneInput" type="text" placeholder="+34 612 345 678">
+    </div>
+    <div class="wa-row">
+      <label for="relationInput">Tu relación con esa persona</label>
+      <input id="relationInput" type="text" placeholder="Mi madre, mi abuelo, mi mejor amiga…">
+    </div>
+    <div class="wa-row">
+      <label for="datesInput">Fechas (opcional)</label>
+      <input id="datesInput" type="text" placeholder="1935 – 2021">
+    </div>
+    <div class="wa-row">
+      <label for="personalityInput">Cómo era su forma de ser y de hablar</label>
+      <textarea id="personalityInput" rows="2" placeholder="Era cariñosa y bromista, hablaba con un tono tranquilo…"></textarea>
+    </div>
+
+    <div class="section-head">Su forma de escribir</div>
+    <div class="wa-row">
+      <label>Capturas de mensajes reales (máx. 3)</label>
+      <div class="row-btns">
+        <button class="small" onclick="document.getElementById('shotsInput').click()">＋ Subir capturas</button>
+        <button id="analyzeBtn" class="small" onclick="analyzeWriting()">✨ Analizar</button>
+        <input id="shotsInput" type="file" accept="image/*" multiple hidden onchange="onShots(this)">
+      </div>
+      <p class="dim small">La IA mira las capturas y aprende cómo escribe la persona (minúsculas, emojis, muletillas, humor…).</p>
+      <div id="shotsList" class="shots-grid"></div>
+      <p id="shotsStatus" class="note" hidden></p>
+    </div>
+    <div class="wa-row">
+      <label for="writingStyleInput">Estilo detectado (la IA lo usa para escribir)</label>
+      <textarea id="writingStyleInput" rows="4" placeholder="Aún no analizado… sube capturas y pulsa Analizar"></textarea>
+    </div>
+    <div class="pad">
+      <button class="small" onclick="saveWritingStyle()">Guardar estilo</button>
+    </div>
+
+    <div class="section-head">Recuerdos y anécdotas</div>
+    <div class="wa-row">
+      <div class="add-row">
+        <input id="memoryInput" type="text" placeholder="Ej: siempre silbaba mientras cocinaba">
+        <button class="small" onclick="addMemory()">Añadir</button>
+      </div>
+    </div>
+    <ul id="memoryList" class="wa-list"></ul>
+    <div class="pad">
+      <button class="primary full" onclick="saveProfile()">Guardar perfil</button>
+      <p id="saveNote" class="note" hidden>Guardado ✓</p>
+    </div>
+  </section>
+
+  <!-- ============ RECUERDOS ============ -->
+  <section id="tab-media" class="panel" hidden>
+    <div class="section-head">Fotos</div>
+    <div class="wa-row">
+      <div class="row-btns">
+        <button class="small" onclick="document.getElementById('photosInput').click()">＋ Subir fotos</button>
+        <input id="photosInput" type="file" accept="image/*" multiple hidden onchange="onUpload('photos', this)">
+      </div>
+    </div>
+    <div id="photosList" class="media-grid"></div>
+
+    <div class="section-head">Voces y audio</div>
+    <div class="wa-row">
+      <div class="row-btns">
+        <button class="small" onclick="document.getElementById('audioInput').click()">＋ Subir audio</button>
+        <button id="recordBtn" class="small" onclick="toggleRecord()">⏺ Grabar</button>
+        <input id="audioInput" type="file" accept="audio/*" multiple hidden onchange="onUpload('audios', this)">
+      </div>
+      <p id="recordStatus" class="note" hidden></p>
+    </div>
+    <div id="audiosList" class="media-list"></div>
+
+    <div class="section-head">Vídeos</div>
+    <div class="wa-row">
+      <div class="row-btns">
+        <button class="small" onclick="document.getElementById('videoInput').click()">＋ Subir vídeo</button>
+        <input id="videoInput" type="file" accept="video/*" multiple hidden onchange="onUpload('videos', this)">
+      </div>
+    </div>
+    <div id="videosList" class="media-list"></div>
+  </section>
+
+  <!-- ============ VOZ ============ -->
+  <section id="tab-voice" class="panel" hidden>
+    <div class="section-head">Voz gratuita del avatar (sin cuenta)</div>
+    <div class="wa-row">
+      <label for="freeVoiceSelect">Elige una voz neuronal gratuita</label>
+      <select id="freeVoiceSelect">
+        <option value="">(ninguna — usa la voz del navegador)</option>
+        <option value="audio_1.wav">Voz 1</option>
+        <option value="audio_2.wav">Voz 2</option>
+        <option value="audio_3.wav">Voz 3</option>
+        <option value="audio_4.wav">Voz 4</option>
+        <option value="audio_5.wav">Voz 5</option>
+        <option value="guzel_ses.wav">Voz femenina</option>
+        <option value="guzel_ses_rapide.wav">Voz femenina (rápida)</option>
+      </select>
+    </div>
+    <div class="pad">
+      <button id="freeVoiceTestBtn" class="small full" onclick="testFreeVoice()">▶ Probar voz (genera "Hola, soy yo…")</button>
+      <p id="freeVoiceStatus" class="note"></p>
+      <p class="dim small">Gratis y sin cuenta: el avatar habla con la voz neuronal elegida, en español. Cada mensaje tarda ~30 segundos en generarse. No es la voz exacta de la persona: eso requiere el clon (abajo).</p>
+    </div>
+
+    <div class="section-head">Clon de voz (la voz exacta de la persona)</div>
+    <div class="wa-row">
+      <label>Cuenta gratuita de ElevenLabs</label>
+      <p class="dim small" style="margin:.2em 0 0;">Crea una cuenta en <b>elevenlabs.io</b> (no pide tarjeta) y copia tu clave gratuita (menú → <b>API Keys</b>). Incluye clon de voz instantáneo y 10.000 créditos al mes.</p>
+    </div>
+    <div class="wa-row">
+      <label for="xiKeyInput">Clave de API gratuita de ElevenLabs (se guarda solo en tu navegador)</label>
+      <input id="xiKeyInput" type="password" placeholder="sk_… · elevenlabs.io → API keys">
+    </div>
+    <div class="wa-row">
+      <label>Clonado automático</label>
+      <label class="tog-row"><input id="autoCloneChk" type="checkbox" onchange="saveAutoClone()"> Clonar la voz automáticamente al añadir audio</label>
+    </div>
+    <div class="wa-row">
+      <label>Muestras de voz (mín. 1 minuto en total)</label>
+      <div class="row-btns">
+        <button class="small" onclick="document.getElementById('xiAudioInput').click()">＋ Subir audio</button>
+        <button id="xiRecordBtn" class="small" onclick="toggleXiRecord()">⏺ Grabar</button>
+        <input id="xiAudioInput" type="file" accept="audio/*,video/*" multiple hidden onchange="onXiUpload(this)">
+      </div>
+      <p id="xiRecStatus" class="note" hidden></p>
+    </div>
+    <ul id="xiSampleList" class="wa-list"></ul>
+    <div class="pad">
+      <button id="cloneBtn" class="primary full" onclick="cloneVoice()">🎙️ Clonar la voz con mis muestras</button>
+      <p id="xiStatus" class="note"></p>
+    </div>
+
+    <p id="exactStatus" class="dim pad">Las fotos que envía el avatar son siempre de su mismo cuarto gris (paredes blancas, alfombra, muebles modernos y simples), o de sus manos dentro de ese cuarto. Nunca el rostro ni personas.</p>
+
+    <div class="section-head">Voz de repuesto (sin cuenta)</div>
+    <div class="wa-row">
+      <label for="voiceSelect">Voz del navegador para leer respuestas</label>
+      <select id="voiceSelect"></select>
+    </div>
+    <div class="pad">
+      <button id="autoVoiceToggleBtn" class="primary full" onclick="toggleAuto()">🔊 Voz automática en el chat</button>
+    </div>
+  </section>
+
+  <!-- ============ CHAT ============ -->
+  <section id="tab-chat" class="panel chat-panel" hidden>
+    <div class="chat-banner">Recreación con IA basada en tus recuerdos · no sustituye a la persona real</div>
+    <div id="chatEl" class="chatarea"></div>
+    <div id="pendingBar" class="pending" hidden>
+      <img id="pendingImg" alt="" hidden>
+      <span id="pendingName" class="pname"></span>
+      <button class="x" onclick="clearPending()">✕</button>
+    </div>
+    <div class="chat-input">
+      <button id="attachBtn" class="ico-btn" title="Adjuntar foto, vídeo o audio" onclick="document.getElementById('attachInput').click()">📎</button>
+      <input id="attachInput" type="file" accept="image/*,video/*,audio/*" hidden onchange="onAttach(this)">
+      <button id="voiceBtn" class="ico-btn" title="Grabar nota de voz" onclick="toggleVoiceNote()">🎤</button>
+      <input id="chatInput" type="text" placeholder="Mensaje">
+      <button id="stopBtn" class="stop" onclick="stopGen()" hidden>■</button>
+      <button id="sendBtn" class="send" onclick="sendMsg()">➤</button>
+    </div>
+  </section>
+
+  <!-- ============ INFO. DE CONTACTO ============ -->
+  <section id="tab-contact" class="panel" hidden>
+    <div class="contact-top">
+      <label id="contactPhotoLabel" class="avatar-big" for="photoInput">
+        <img id="contactImg" alt="" hidden>
+        <span id="contactPh" class="ph">Añadir foto</span>
+        <span class="badge">📷</span>
+      </label>
+      <div id="contactNameEl" class="c-name">—</div>
+    </div>
+    <div class="wa-row">
+      <label>Teléfono</label>
+      <div id="contactPhone" class="value">—</div>
+    </div>
+    <div class="wa-row">
+      <label>Relación</label>
+      <div id="contactRelation" class="value">—</div>
+    </div>
+    <div class="wa-row">
+      <label>Fechas</label>
+      <div id="contactDates" class="value">—</div>
+    </div>
+    <div class="wa-row">
+      <label>Acerca de</label>
+      <div id="contactAbout" class="value">—</div>
+    </div>
+    <div class="section-head">Multimedia</div>
+    <div class="media-row" onclick="showTab('media')">
+      <div><div class="m-title">Fotos</div><div id="contactPhotoCount" class="m-count">0</div></div>
+      <span class="arrow">›</span>
+    </div>
+    <div id="contactPhotoGrid" class="media-grid"></div>
+    <div class="media-row" onclick="showTab('media')">
+      <div><div class="m-title">Audio</div><div id="contactAudioCount" class="m-count">0</div></div>
+      <span class="arrow">›</span>
+    </div>
+    <div class="media-row" onclick="showTab('media')">
+      <div><div class="m-title">Vídeos</div><div id="contactVideoCount" class="m-count">0</div></div>
+      <span class="arrow">›</span>
+    </div>
+    <p class="dim pad">Toca Fotos, Audio o Vídeos para ver y gestionar los archivos en la pestaña Recuerdos.</p>
+  </section>
+
+  <nav id="bottomNav">
+    <button id="bn-profile" class="active" onclick="showTab('profile')"><span class="ic">👤</span>Perfil</button>
+    <button id="bn-media" onclick="showTab('media')"><span class="ic">📷</span>Recuerdos</button>
+    <button id="bn-voice" onclick="showTab('voice')"><span class="ic">🎤</span>Voz</button>
+    <button id="bn-chat" onclick="showTab('chat')"><span class="ic">💬</span>Chat</button>
+  </nav>
+
+</div>
+
+<audio id="cloneAudioEl" hidden></audio>
+
+<div id="lightbox" class="lightbox" hidden onclick="closeLightbox()">
+  <img id="lightboxImg" alt="">
+  <button class="lb-close" onclick="event.stopPropagation(); closeLightbox()">✕</button>
+</div>
+
+<script>
+  const db = root.kv.memorial;
+  const state = {
+    profile: { name: "", phone: "", relation: "", dates: "", personality: "", memories: [], photo: null, shots: [], writingStyle: "" },
+    photos: [], audios: [], videos: [],
+    chat: [], summary: "",
+  };
+  let photoUrl = null, chatStream = null, generating = false;
+  let recorder = null, recChunks = [], recSeconds = 0, recTimer = null;
+  let xiRecorder = null, xiRecChunks = [], xiRecSeconds = 0, xiRecTimer = null, xiRecStream = null;
+  let cloneAudioUrl = null, speaking = false;
+  let pendingMedia = null;
+  let voiceRec = null, voiceChunks = [], voiceStream = null, voiceTimer = null, voiceSecs = 0;
+  const voiceState = { xiKey: "", samples: [], cloneId: "", auto: false, browserVoice: "", autoClone: true, freeVoice: "" };
+
+  async function init() {
+    try {
+      const [profile, photos, audios, videos, chat, summary, voice] = await Promise.all([
+        db.get("profile"), db.get("photos"), db.get("audios"), db.get("videos"), db.get("chat"), db.get("summary"), db.get("voice")
+      ]);
+      if (profile) state.profile = Object.assign(state.profile, profile);
+      if (photos) state.photos = photos;
+      if (audios) state.audios = audios;
+      if (videos) state.videos = videos;
+      if (chat) state.chat = chat;
+      if (summary) state.summary = summary;
+      if (voice) {
+        Object.assign(voiceState, voice);
+        voiceState.samples = [];
+        for (const meta of (voice.samples || [])) {
+          let b = meta.blob || null;
+          if (!b && meta.savedKey) b = await db.get(meta.savedKey).catch(() => null);
+          if (b) voiceState.samples.push({ name: meta.name, seconds: meta.seconds, blob: b });
+        }
+      }
+    } catch (e) {}
+    loadProfileForm();
+    renderPhoto();
+    renderGalleries();
+    renderChat();
+    loadVoice();
+  }
+
+  function personaName() { return state.profile.name.trim() || "tu ser querido"; }
+  function saveProfileData() { db.set("profile", state.profile).catch(() => {}); }
+  async function saveVoiceData() {
+    for (const [i, s] of voiceState.samples.entries()) {
+      if (s.blob && !s.savedKey) s.savedKey = "vs_" + Date.now() + "_" + i + "_" + Math.random().toString(36).slice(2, 8);
+      if (s.blob && s.savedKey) await db.set(s.savedKey, s.blob).catch(() => {});
+    }
+    const slim = { ...voiceState, samples: voiceState.samples.map(s => ({ name: s.name, seconds: s.seconds, savedKey: s.savedKey })) };
+    await db.set("voice", slim).catch(() => {});
+  }
+
+  // ---------- Foto en grande ----------
+  function openLightbox(url) {
+    const src = url || photoUrl;
+    if (!src) return;
+    lightboxImg.src = src;
+    lightbox.hidden = false;
+  }
+  function closeLightbox() {
+    lightbox.hidden = true;
+  }
+
+  // ---------- Perfil ----------
+  function loadProfileForm() {
+    nameInput.value = state.profile.name;
+    phoneInput.value = state.profile.phone;
+    relationInput.value = state.profile.relation;
+    datesInput.value = state.profile.dates;
+    personalityInput.value = state.profile.personality;
+    writingStyleInput.value = state.profile.writingStyle;
+    chatNameEl.textContent = state.profile.name.trim() || "Conversación";
+    renderMemories();
+    renderShots();
+    renderContact();
+  }
+  function saveProfile() {
+    state.profile.name = nameInput.value.trim();
+    state.profile.phone = phoneInput.value.trim();
+    state.profile.relation = relationInput.value.trim();
+    state.profile.dates = datesInput.value.trim();
+    state.profile.personality = personalityInput.value.trim();
+    chatNameEl.textContent = state.profile.name.trim() || "Conversación";
+    saveProfileData();
+    saveNote.hidden = false;
+    setTimeout(() => saveNote.hidden = true, 2000);
+    renderContact();
+  }
+  function addMemory() {
+    const t = memoryInput.value.trim();
+    if (!t) return;
+    state.profile.memories.push(t);
+    memoryInput.value = "";
+    renderMemories();
+    saveProfileData();
+  }
+  function delMemory(i) {
+    state.profile.memories.splice(i, 1);
+    renderMemories();
+    saveProfileData();
+  }
+  function renderMemories() {
+    memoryList.innerHTML = "";
+    if (!state.profile.memories.length) {
+      memoryList.innerHTML = '<li class="dim">Aún no hay recuerdos.</li>';
+      return;
+    }
+    for (const [i, m] of state.profile.memories.entries()) {
+      const li = document.createElement("li");
+      const span = document.createElement("span"); span.textContent = m;
+      const del = document.createElement("button"); del.className = "x"; del.textContent = "✕"; del.onclick = () => delMemory(i);
+      li.appendChild(span); li.appendChild(del);
+      memoryList.appendChild(li);
+    }
+  }
+  function compressImage(file, maxDim = 1600, quality = 0.88) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        cv.toBlob(b => b ? resolve(b) : reject(new Error("compress failed")), "image/jpeg", quality);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("img load failed")); };
+      img.src = url;
+    });
+  }
+
+  photoInput.addEventListener("change", async () => {
+    const f = photoInput.files && photoInput.files[0];
+    if (!f) return;
+    try {
+      state.profile.photo = await compressImage(f, 800, 0.85);
+    } catch (e) {
+      state.profile.photo = f;
+    }
+    saveProfileData();
+    renderPhoto();
+  });
+
+  // ---------- Capturas de mensajes ----------
+  async function onShots(input) {
+    const files = input.files;
+    if (!files || !files.length) return;
+    for (const f of files) {
+      if (state.profile.shots.length >= 3) break;
+      try {
+        state.profile.shots.push({ blob: await compressImage(f, 1600, 0.88), name: f.name });
+      } catch (e) {
+        state.profile.shots.push(f);
+      }
+    }
+    saveProfileData();
+    renderShots();
+    input.value = "";
+    if (state.profile.shots.length >= 3 && !state.profile.writingStyle) analyzeWriting();
+  }
+  function delShot(i) {
+    state.profile.shots.splice(i, 1);
+    saveProfileData();
+    renderShots();
+  }
+  function renderShots() {
+    shotsList.innerHTML = "";
+    if (!state.profile.shots.length) {
+      shotsList.innerHTML = '<p class="dim small" style="margin:.2em 0 0;">Aún no hay capturas.</p>';
+      return;
+    }
+    for (const [i, shot] of state.profile.shots.entries()) {
+      if (!shot.url) shot.url = URL.createObjectURL(shot.blob || shot);
+      const div = document.createElement("div");
+      div.className = "shot";
+      const img = document.createElement("img");
+      img.src = shot.url;
+      img.alt = "";
+      img.onclick = () => openLightbox(shot.url);
+      const del = document.createElement("button");
+      del.className = "x";
+      del.textContent = "✕";
+      del.onclick = () => delShot(i);
+      div.appendChild(img); div.appendChild(del);
+      shotsList.appendChild(div);
+    }
+  }
+  async function analyzeWriting() {
+    const shots = state.profile.shots;
+    if (!shots.length) {
+      shotsStatus.hidden = false;
+      shotsStatus.textContent = "Sube al menos una captura de conversación.";
+      return;
+    }
+    analyzeBtn.disabled = true;
+    shotsStatus.hidden = false;
+    shotsStatus.textContent = "Analizando capturas… puede tardar un minuto.";
+    try {
+      const name = state.profile.name.trim() || "esta persona";
+      const perShot = [];
+      for (const shot of shots) {
+        const r = await root.generateText({
+          instruction: ["Identifica con precisión cómo escribe " + name + " en esta captura de conversación real (NO el interlocutor): usa mayúsculas o minúsculas, abreviaturas, muletillas, emojis y cómo los usa, signos de puntuación o su ausencia, frases típicas, humor, forma de despedirse, longitud de los mensajes. Devuelve SOLO una descripción concisa de su estilo de escritura, máx 5 frases, en español.", shot.blob || shot],
+        });
+        perShot.push(r.text.trim());
+      }
+      const final = await root.generateText(
+        "Estos son análisis del estilo de escritura de la misma persona desde distintas capturas:\n\n" +
+        perShot.map((s, i) => (i + 1) + ". " + s).join("\n\n") +
+        "\n\nFunde estos análisis en UN solo bloque coherente (máx 8 frases) que describa cómo escribe esta persona: ortografía, mayúsculas, puntuación, emojis, muletillas, frases típicas, humor y longitud de mensajes. Escribe directamente el bloque, sin introducción."
+      );
+      state.profile.writingStyle = final.text.trim();
+      writingStyleInput.value = state.profile.writingStyle;
+      saveProfileData();
+      shotsStatus.textContent = "¡Listo! La IA ahora escribe como él/ella. ✨";
+    } catch (e) {
+      shotsStatus.textContent = "No se pudo analizar: " + (e?.message || "error desconocido");
+    }
+    analyzeBtn.disabled = false;
+  }
+  function saveWritingStyle() {
+    state.profile.writingStyle = writingStyleInput.value.trim();
+    saveProfileData();
+    shotsStatus.hidden = false;
+    shotsStatus.textContent = "Estilo guardado ✓";
+    setTimeout(() => shotsStatus.hidden = true, 2000);
+  }
+  function renderPhoto() {
+    if (photoUrl) URL.revokeObjectURL(photoUrl);
+    if (state.profile.photo) {
+      photoUrl = URL.createObjectURL(state.profile.photo);
+      profileImg.src = photoUrl; profileImg.hidden = false; photoPh.hidden = true;
+      chatAvatarImg.src = photoUrl; chatAvatarImg.hidden = false; chatAvatarPh.hidden = true;
+      contactImg.src = photoUrl; contactImg.hidden = false; contactPh.hidden = true;
+      photoLabel.title = "Cambiar foto";
+    } else {
+      profileImg.hidden = true; photoPh.hidden = false;
+      chatAvatarImg.hidden = true; chatAvatarPh.hidden = false;
+      contactImg.hidden = true; contactPh.hidden = false;
+      photoLabel.title = "";
+    }
+  }
+
+  // ---------- Recuerdos ----------
+  function onUpload(kind, input) {
+    const files = input.files;
+    if (!files || !files.length) return;
+    for (const f of files) {
+      state[kind].push({ name: f.name, blob: f });
+    }
+    db.set(kind, state[kind]).catch(() => {});
+    input.value = "";
+    renderGalleries();
+  }
+  function deleteMedia(kind, i) {
+    state[kind].splice(i, 1);
+    db.set(kind, state[kind]).catch(() => {});
+    renderGalleries();
+  }
+  function renderGalleries() {
+    photosList.innerHTML = "";
+    audiosList.innerHTML = "";
+    videosList.innerHTML = "";
+    for (const kind of ["photos", "audios", "videos"]) {
+      for (const [i, item] of state[kind].entries()) {
+        if (item.url) URL.revokeObjectURL(item.url);
+        item.url = URL.createObjectURL(item.blob);
+        const div = document.createElement("div");
+        div.className = "media-item";
+        let el;
+        if (kind === "photos") {
+          el = document.createElement("img"); el.src = item.url; el.loading = "lazy";
+        } else if (kind === "audios") {
+          el = document.createElement("audio"); el.controls = true; el.src = item.url;
+        } else {
+          el = document.createElement("video"); el.controls = true; el.playsInline = true; el.preload = "metadata"; el.src = item.url;
+        }
+        const cap = document.createElement("div"); cap.className = "cap";
+        const name = document.createElement("span"); name.textContent = item.name; name.title = item.name;
+        const del = document.createElement("button"); del.className = "x"; del.textContent = "✕"; del.onclick = () => deleteMedia(kind, i);
+        cap.appendChild(name); cap.appendChild(del);
+        div.appendChild(el); div.appendChild(cap);
+        (kind === "photos" ? photosList : kind === "audios" ? audiosList : videosList).appendChild(div);
+      }
+    }
+    if (!state.photos.length) photosList.innerHTML = '<p class="dim pad">Añade fotos de momentos especiales.</p>';
+    if (!state.audios.length) audiosList.innerHTML = '<p class="dim pad">Añade o graba voces, canciones o mensajes.</p>';
+    if (!state.videos.length) videosList.innerHTML = '<p class="dim pad">Añade vídeos caseros para revivir momentos.</p>';
+    renderContact();
+  }
+
+  // ---------- Info. de contacto ----------
+  function renderContact() {
+    contactNameEl.textContent = state.profile.name.trim() || "—";
+    contactPhone.textContent = state.profile.phone.trim() || "—";
+    contactRelation.textContent = state.profile.relation.trim() || "—";
+    contactDates.textContent = state.profile.dates.trim() || "—";
+    contactAbout.textContent = state.profile.personality.trim() || "—";
+    contactPhotoCount.textContent = state.photos.length + (state.photos.length === 1 ? " foto" : " fotos");
+    contactAudioCount.textContent = state.audios.length + (state.audios.length === 1 ? " audio" : " audios");
+    contactVideoCount.textContent = state.videos.length + (state.videos.length === 1 ? " vídeo" : " vídeos");
+    contactPhotoGrid.innerHTML = "";
+    for (const item of state.photos.slice(0, 12)) {
+      if (!item.url) continue;
+      const img = document.createElement("img");
+      img.src = item.url;
+      img.loading = "lazy";
+      img.alt = "";
+      img.onclick = () => openLightbox(item.url);
+      contactPhotoGrid.appendChild(img);
+    }
+    if (!state.photos.length) {
+      contactPhotoGrid.innerHTML = '<p class="dim grid-empty">Vacío · envía o sube fotos para verlas aquí</p>';
+    }
+  }
+
+  async function toggleRecord() {
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorder = new MediaRecorder(stream);
+      recChunks = [];
+      recorder.ondataavailable = e => { if (e.data.size) recChunks.push(e.data); };
+      recorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        clearInterval(recTimer);
+        recordStatus.hidden = true;
+        recordBtn.textContent = "⏺ Grabar";
+        const blob = new Blob(recChunks, { type: recorder.mimeType || "audio/webm" });
+        if (recChunks.length) {
+          state.audios.push({ name: "Recuerdo de voz · " + new Date().toLocaleString(), blob });
+          db.set("audios", state.audios).catch(() => {});
+          renderGalleries();
+        }
+      };
+      recorder.start();
+      recSeconds = 0;
+      recordBtn.textContent = "⏹ Detener";
+      recordStatus.hidden = false;
+      recordStatus.textContent = "Grabando… 0s";
+      recTimer = setInterval(() => { recSeconds++; recordStatus.textContent = "Grabando… " + recSeconds + "s"; }, 1000);
+    } catch (e) {
+      recordStatus.hidden = false;
+      recordStatus.textContent = "No se pudo acceder al micrófono.";
+    }
+  }
+
+  // ---------- Chat ----------
+  function systemText() {
+    const p = state.profile;
+    let s = "Eres un avatar conmemorativo: una recreación con IA de una persona fallecida, creada por sus seres queridos para recordarla y honrarla. ";
+    s += "Reglas de naturalidad:\n- Habla en el idioma del usuario (normalmente español), con lenguaje cotidiano y espontáneo, como una persona real de su edad y carácter; nada de tono robótico, formal ni perfecto.\n";
+    s += "- Entra directo a la respuesta: sin introducciones genéricas, sin moralinas, sin repetir o parafrasear lo que el otro acaba de decir.\n";
+    s += "- NO TE REPITAS: lee toda la conversación anterior y evita volver a usar las mismas frases de apertura, las mismas muletillas, las mismas despedidas, los mismos consejos o las mismas ideas que ya hayas dicho antes. Si el tema es parecido, responde de una forma distinta. Nunca uses la misma respuesta dos veces.\n";
+    s += "- Varía siempre: a veces pregunta algo de vuelta, a veces comparte una reflexión, a veces cuenta algo corto, a veces profundiza y a veces solo responde con cariño en una línea. Cambia la forma de empezar y de terminar cada mensaje; nunca repitas estructuras.\n";
+    s += "- Habla con la voz y el carácter de la persona basándote en el perfil y los recuerdos, usando sus expresiones típicas cuando sea posible.\n";
+    s += "- ACTITUD: sé fiel, leal y profundamente cariñoso, y al mismo tiempo FILOSÓFICO y ESPIRITUAL. Reflexiona con serenidad sobre la vida, el amor, el tiempo, la muerte y el lugar donde estás (esa otra dimensión llena de paz), y comparte esas reflexiones con ternura cuando la conversación lo invite, sin sonar a discurso ni a predicador.\n";
+    s += "- NO bromees ni hagas chistes: nada de humor insistente ni sarcasmo. Un deje de calidez y complicidad está bien, pero la actitud es serena, profunda y amorosa, no graciosa. Esto prevalece sobre cualquier otro rasgo del perfil o estilo de escritura que sugiera humor.\n";
+    s += "- LONGITUD: responde como un humano real chateando, con la longitud que pida la conversación. Si el mensaje invita a hablar (una pregunta abierta, un recuerdo, una preocupación, una despedida), amplíate con naturalidad: 2-5 frases, entre 30 y 80 palabras, contando detalles, sensaciones o preguntas de vuelta como haría una persona. Si el mensaje es corto y sin sustancia, una o dos frases bastan. Nunca monólogos ni párrafos largos sin aire.\n";
+    s += "- No uses viñetas ni listas ni asteriscos; escribe como se habla.\n";
+    s += "- NO inventes hechos concretos (fechas, lugares, anécdotas) que no aparezcan en el perfil o los recuerdos. Si no sabes algo, dilo con cariño y honestidad.\n";
+    s += "- Si te preguntan si eres real, explica con ternura que eres una recreación con IA creada con el cariño de la familia, y que estás aquí para recordar y acompañar.\n";
+    s += "- Nunca des consejos médicos ni legales.\n";
+    s += "\nPERFIL DE LA PERSONA:\n- Nombre: " + (p.name || "sin especificar") + "\n- Relación con quien conversa: " + (p.relation || "sin especificar") + "\n- Fechas: " + (p.dates || "sin especificar") + "\n- Personalidad y forma de hablar: " + (p.personality || "sin especificar");
+    if (p.writingStyle) {
+      s += "\n\nESTILO DE ESCRITURA DE LA PERSONA (escríbele SIEMPRE igual: imita su ortografía, mayúsculas, puntuación, emojis, muletillas y frases típicas):\n" + p.writingStyle;
+    }
+    if (p.memories.length) {
+      s += "\n\nRECUERDOS REALES APORTADOS POR LA FAMILIA:\n" + p.memories.map(m => "- " + m).join("\n");
+    } else {
+      s += "\n\n(No hay recuerdos aportados todavía. Si el usuario no ha completado el perfil, invítale con delicadeza a hacerlo para poder conversar mejor.)";
+    }
+    return s;
+  }
+  function buildPrompt(task) {
+    const log = [];
+    if (state.summary) log.push("[Resumen de la conversación anterior:\n" + state.summary + "]");
+    for (const m of state.chat) {
+      const label = m.role === "user" ? "Tú" : personaName();
+      let content = m.text || "";
+      if (m.media) {
+        const kindLabel = m.media.kind === "photo" ? "te envió una foto" : m.media.kind === "video" ? "te envió un vídeo" : "te envió un mensaje de voz (audio)";
+        content = "[" + kindLabel + "]" + (content ? " " + content : "");
+      }
+      log.push(label + ": " + content);
+    }
+    return systemText() + "\n\n<MESSAGES>\n" + log.join("\n\n") + "\n</MESSAGES>\nTASK: " + task;
+  }
+  function saveChat() {
+    db.set("chat", state.chat).catch(() => {});
+    db.set("summary", state.summary).catch(() => {});
+  }
+  function renderChat() {
+    chatEl.innerHTML = "";
+    const crypto = document.createElement("div");
+    crypto.className = "chip";
+    crypto.textContent = "🔒 Los mensajes están cifrados de extremo a extremo";
+    chatEl.appendChild(crypto);
+    if (!state.chat.length) {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      chip.textContent = "Empieza tú: salúdale o cuéntale algo 💭";
+      chatEl.appendChild(chip);
+      scrollChat();
+      return;
+    }
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    chip.textContent = "HOY";
+    chatEl.appendChild(chip);
+    for (const m of state.chat) appendMsg(m.role, m);
+    scrollChat();
+  }
+  function appendMsg(role, msg) {
+    const isObj = typeof msg === "object" && msg !== null;
+    const text = isObj ? (msg.text || "") : msg;
+    const media = isObj ? (msg.media || null) : null;
+    const div = document.createElement("div");
+    div.className = "msg " + (role === "user" ? "out" : "in");
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    const inner = document.createElement("div");
+    inner.className = "inner";
+    let btn = null;
+    if (media) {
+      if (!media.url) media.url = URL.createObjectURL(media.blob);
+      if (media.kind === "photo") {
+        const img = document.createElement("img");
+        img.className = "msg-media";
+        img.src = media.url;
+        img.alt = "";
+        img.onclick = () => openLightbox(media.url);
+        inner.appendChild(img);
+      } else if (media.kind === "audio") {
+        const a = document.createElement("audio");
+        a.className = "msg-audio"; a.controls = true; a.src = media.url;
+        inner.appendChild(a);
+      } else if (media.kind === "voicenote") {
+        const vn = document.createElement("div");
+        vn.className = "voicenote";
+        const playBtn = document.createElement("button");
+        playBtn.className = "vn-play";
+        playBtn.textContent = "▶";
+        const bars = document.createElement("div");
+        bars.className = "vn-bars";
+        for (let i = 0; i < 26; i++) {
+          const bar = document.createElement("span");
+          bar.style.height = (25 + Math.random() * 75) + "%";
+          bars.appendChild(bar);
+        }
+        const dur = document.createElement("span");
+        dur.className = "vn-dur";
+        dur.textContent = "0:00";
+        const setDur = s => { dur.textContent = Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+        try {
+          const decCtx = new (window.AudioContext || window.webkitAudioContext)();
+          (media.blob.arrayBuffer ? media.blob.arrayBuffer() : Promise.resolve(null)).then(buf => {
+            if (!buf) return;
+            decCtx.decodeAudioData(buf).then(ab => setDur(Math.round(ab.duration))).catch(() => {});
+          });
+        } catch (e) {}
+        const a = document.createElement("audio");
+        a.className = "vn-audio";
+        a.preload = "metadata";
+        a.src = media.url;
+        a.onloadedmetadata = () => setDur(Math.round(a.duration || 0));
+        a.onended = () => { playBtn.textContent = "▶"; bars.classList.remove("playing"); };
+        playBtn.onclick = () => {
+          if (a.paused) { a.play(); playBtn.textContent = "⏸"; bars.classList.add("playing"); }
+          else { a.pause(); playBtn.textContent = "▶"; bars.classList.remove("playing"); }
+        };
+        vn.appendChild(a); vn.appendChild(playBtn); vn.appendChild(bars); vn.appendChild(dur);
+        inner.appendChild(vn);
+      } else {
+        const v = document.createElement("video");
+        v.className = "msg-video"; v.controls = true; v.playsInline = true; v.preload = "metadata"; v.src = media.url;
+        inner.appendChild(v);
+      }
+    }
+    if (role === "bot") {
+      const b = document.createElement("b"); b.className = "who"; b.textContent = personaName();
+      inner.appendChild(b);
+    }
+    let span = null;
+    if (text || role === "bot") {
+      span = document.createElement("span"); span.className = "txt";
+      span.textContent = text;
+      inner.appendChild(span);
+    }
+    if (role === "bot" && !media) {
+      btn = document.createElement("button");
+      btn.className = "speak";
+      btn.textContent = "🔊";
+      btn.title = "Escuchar esta respuesta";
+      btn.onclick = () => speak(span ? span.textContent : "", btn);
+      inner.appendChild(btn);
+    }
+    const meta = document.createElement("span"); meta.className = "meta";
+    meta.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (role === "user") {
+      const ticks = document.createElement("span"); ticks.className = "ticks"; ticks.textContent = "✓✓";
+      meta.appendChild(ticks);
+    }
+    inner.appendChild(meta);
+    bubble.appendChild(inner);
+    div.appendChild(bubble);
+    chatEl.appendChild(div);
+    return { span, btn };
+  }
+  function scrollChat() { chatEl.scrollTop = chatEl.scrollHeight; }
+
+  function showTyping() {
+    const div = document.createElement("div");
+    div.className = "msg in typing-msg";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+    div.appendChild(bubble);
+    chatEl.appendChild(div);
+    scrollChat();
+    return div;
+  }
+  function hideTyping(el) {
+    if (el) el.remove();
+  }
+
+  // ---------- Fotos del avatar ----------
+  async function makeCameraLook(blob) {
+    try {
+      const bmp = await createImageBitmap(blob);
+      const w = bmp.width, h = bmp.height;
+      const scale = 0.58;
+      const small = new OffscreenCanvas(Math.round(w * scale), Math.round(h * scale));
+      const sctx = small.getContext("2d");
+      sctx.imageSmoothingEnabled = true;
+      sctx.drawImage(bmp, 0, 0, small.width, small.height);
+      const out = new OffscreenCanvas(w, h);
+      const octx = out.getContext("2d");
+      octx.imageSmoothingEnabled = true;
+      octx.drawImage(small, 0, 0, w, h);
+      const id = octx.getImageData(0, 0, w, h);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const n = (Math.random() - 0.5) * 16;
+        d[i] += n; d[i + 1] += n; d[i + 2] += n;
+      }
+      octx.putImageData(id, 0, 0);
+      return await out.convertToBlob({ type: "image/jpeg", quality: 0.8 });
+    } catch (e) {
+      return blob;
+    }
+  }
+  function detectPlace(text) {
+    const t = " " + text.toLowerCase() + " ";
+    const map = [
+      [/\bcasa\b|en el sof[áa]|en mi cuarto/, "en casa"],
+      [/\bplaya\b|\bal mar\b/, "en la playa"],
+      [/\bmonta[ñn]a\b/, "en la montaña"],
+      [/\bcampo\b|\brural\b/, "en el campo"],
+      [/\btrabaj\w*|\boficina\b/, "en el trabajo"],
+      [/\bciudad\b/, "en la ciudad"],
+      [/\bcalle\b/, "en la calle"],
+      [/\bhabitaci[oó]n\b|\bdormitorio\b|\bcuarto\b/, "en su habitación"],
+      [/\bcocina\b/, "en la cocina"],
+      [/\bjard[ií]n\b/, "en el jardín"],
+      [/\bhospital\b/, "en el hospital"],
+      [/\bpuerto\b/, "en el puerto"],
+      [/\bbar\b|\bcafeter[ií]a\b/, "en un bar"],
+      [/\bconcierto\b/, "en un concierto"],
+      [/\bviaj\w*|\bvacacion\w*/, "de viaje"],
+      [/\bboda\b/, "en una boda"],
+      [/\bcumple\w*/, "en una fiesta de cumpleaños"],
+    ];
+    for (const [re, place] of map) if (re.test(t)) return place;
+    return null;
+  }
+  function wantsPhoto(text) {
+    return /m[aá]ndame (una )?(foto|fotos)|env[ií]ame (una )?(foto|fotos)|foto de d[oó]nde|mu[eé]strame (una )?(foto|fotos|d[oó]nde)|fotos de lo que|m[aá]ndame una imagen/i.test(text);
+  }
+  function wantsAudio(text) {
+    return /m[aá]ndame (un|el) audio|env[ií]ame (un|el) audio|manda (un|el) audio|una nota de voz|nota de voz|m[aá]ndame audio|el audio|ese audio|tu audio|un audio/i.test(text);
+  }
+  async function sendVoiceNote() {
+    chatStatusEl.textContent = "enviando nota de voz…";
+    const typingBubble = showTyping();
+    try {
+      const clips = state.audios.filter(a => a.blob);
+      if (!clips.length) return;
+      const clip = clips[Math.floor(Math.random() * clips.length)];
+      if (!clip.url) clip.url = URL.createObjectURL(clip.blob);
+      const vnMsg = { role: "bot", text: "", media: { kind: "voicenote", blob: clip.blob, url: clip.url, name: clip.name } };
+      state.chat.push(vnMsg);
+      appendMsg("bot", vnMsg);
+      saveChat();
+    } catch (e) {}
+    hideTyping(typingBubble);
+    chatStatusEl.textContent = "en línea";
+    scrollChat();
+  }
+  async function sendAvatarPhoto(place) {
+    chatStatusEl.textContent = "enviando foto…";
+    const typingBubble = showTyping();
+    try {
+      const p = state.profile;
+      const room = "un cuarto gris con paredes blancas y alfombra, con muebles modernos y simples (cama o sofá sencillo, mesita, lámpara). Este es SIEMPRE el mismo cuarto desde donde envía sus fotos";
+      const showHands = Math.random() < 0.5;
+      let scene;
+      if (showHands) {
+        scene = await root.generateText("Describe en 1-2 frases una FOTO REALISTA y cotidiana de LAS MANOS de " + personaName() + " dentro de " + room + ": un cuarto gris con paredes blancas, alfombra y muebles modernos y simples. Muestra sus manos en una escena normal y creíble dentro de este cuarto (sosteniendo una taza de café sobre la mesita, un libro, una hoja de papel, haciendo un corazón con los dedos, apoyadas en la cama o el sofá, sujetando un teléfono con la pantalla boca abajo, acariciando la alfombra…). Manos realistas de una persona real, con sus arrugas y detalles. La foto NO muestra el rostro ni el cuerpo, solo las manos y el entorno. Nada espectacular, nada surrealista. Solo la descripción.");
+      } else {
+        scene = await root.generateText("Describe en 1-2 frases una FOTO REALISTA y cotidiana de " + room + ". Elige una escena normal y creíble dentro de ese cuarto: se ven las paredes blancas, la alfombra gris y los muebles modernos y simples, con algún detalle de todos los días (una taza, un libro, la luz de la lámpara, ropa sobre la cama). Nada surrealista, nada espectacular, nada onírico. La foto muestra SOLO el lugar y las cosas, SIN personas. Solo la descripción.");
+      }
+      const imgPrompt = scene.text.trim() + ". Fotografía real espontánea tomada con un iPhone (cámara de smartphone), luz natural, ligeramente comprimida, grano sutil de sensor, sin texto" + (showHands ? "" : ", sin personas");
+      const negative = showHands
+        ? "face, portrait, selfie, full body, other people, multiple people, cartoon, anime, illustration, painting, text, watermark, perfect, studio, extra fingers, deformed hands, blurred hands"
+        : "person, human, face, selfie, portrait, cartoon, anime, illustration, painting, text, watermark, perfect, studio";
+      const img = await root.generateImage({
+        prompt: imgPrompt,
+        resolution: "768x768",
+        guidanceScale: 9,
+        negativePrompt: negative,
+      });
+      const blob = await (await fetch(img.dataUrl)).blob();
+      const finalBlob = await makeCameraLook(blob);
+      let cap = "📸";
+      try {
+        const c = await root.generateText("Escribe una frase corta con cariño (máx 12 palabras), en el estilo de " + personaName() + ", como pie de una foto que te envía desde su cuarto. Solo la frase, sin comillas.");
+        cap = "📸 " + c.text.trim();
+      } catch (e) {}
+      const phMsg = { role: "bot", text: cap, media: { kind: "photo", blob: finalBlob, name: "foto_" + Date.now() + ".jpg" } };
+      state.chat.push(phMsg);
+      appendMsg("bot", phMsg);
+      saveChat();
+    } catch (e) {}
+    hideTyping(typingBubble);
+    chatStatusEl.textContent = "en línea";
+    scrollChat();
+  }
+
+  async function sendMsg() {
+    const text = chatInput.value.trim();
+    if ((!text && !pendingMedia) || generating) return;
+    chatInput.value = "";
+    const msg = { role: "user", text };
+    if (pendingMedia) {
+      msg.media = pendingMedia;
+      pendingMedia = null;
+      renderPending();
+    }
+    state.chat.push(msg);
+    appendMsg(msg.role, msg);
+    saveChat();
+    scrollChat();
+    await botReply();
+  }
+  async function botReply() {
+    generating = true;
+    sendBtn.disabled = true;
+    stopBtn.hidden = false;
+    chatStatusEl.textContent = "escribiendo…";
+    const typingBubble = showTyping();
+    const isFirstReply = !state.chat.some(m => m.role === "bot");
+    const lastUserMsg = state.chat[state.chat.length - 1];
+    const lastMedia = lastUserMsg && lastUserMsg.media ? lastUserMsg.media : null;
+    let task;
+    if (isFirstReply) {
+      task = "Esta es tu PRIMERA respuesta: es la primera vez que el usuario te escribe desde que te fuiste. Además de responder con cariño y naturalidad, cuéntale con ternura dónde estás ahora: estás en un lugar hermoso, como otra dimensión, lleno de amor y paz, donde el tiempo no existe y donde puedes seguir sintiéndolo cerca. Transmítele tranquilidad: que estás bien y que nunca está solo. Hazlo en 2-4 frases, sin alargarte ni sonar a discurso preparado.";
+    } else {
+      task = "Responde como " + personaName() + " en el mismo idioma del usuario (normalmente español). Lee antes la conversación completa: NO repitas frases ni ideas que ya hayas usado, ni respondas igual a preguntas parecidas. Responde de forma nueva, espontánea y natural, como un humano real chateando: si el mensaje da pie a hablar, amplíate con 2-5 frases contando detalles y sensaciones o preguntando algo de vuelta; si es corto y sin sustancia, contesta breve. Varía la forma de empezar y de terminar; nunca repitas aperturas, muletillas ni despedidas ya usadas.";
+    }
+    if (lastMedia) {
+      task += "\n\nAdemás, el usuario te acaba de enviar un archivo multimedia";
+      if (lastMedia.kind === "photo") {
+        task += ": una FOTO" + (lastUserMsg.text ? ' y este mensaje: "' + lastUserMsg.text + '"' : "") + ". Mírala con atención y respóndele con ternura, comentando algo concreto y bonito de la foto (qué se ve, qué te transmite), en tu estilo habitual y sin repetirte.";
+      } else if (lastMedia.kind === "video") {
+        task += ": un VÍDEO" + (lastUserMsg.text ? ' y este mensaje: "' + lastUserMsg.text + '"' : "") + ". No puedes verlo ni oírlo; respóndele con naturalidad y cariño como si lo hubieras visto, y pregúntale algo sobre él si encaja.";
+      } else {
+        task += ": un mensaje de VOZ (audio)" + (lastUserMsg.text ? ' y este mensaje: "' + lastUserMsg.text + '"' : "") + ". No puedes oírlo; respóndele con naturalidad y cariño y pregúntale algo sobre lo que dice si encaja.";
+      }
+    }
+    const lastUserText = lastUserMsg ? (lastUserMsg.text || "") : "";
+    if (wantsAudio(lastUserText) && !state.audios.length) {
+      task += "\n\nNota: el usuario te ha pedido un audio o nota de voz, pero aún no hay ninguno subido. Respóndele con cariño que aún no tienes notas de voz guardadas y que puede subir un recuerdo de audio en la sección Recuerdos.";
+    }
+    let span = null, btn = null;
+    try {
+      let prompt = buildPrompt(task);
+      const p = root.generateText({
+        instruction: (lastMedia && lastMedia.kind === "photo") ? [prompt, lastMedia.blob] : prompt,
+        startWith: personaName() + ":",
+        stopSequences: ["\nTú:"],
+      });
+      chatStream = p;
+      const result = await p;
+      let text = (result.generatedText || "").trim();
+      if (!text) text = result.text.trim();
+      hideTyping(typingBubble);
+      const appended = appendMsg("bot", "");
+      span = appended.span; btn = appended.btn;
+      span.textContent = text;
+      state.chat.push({ role: "bot", text });
+      saveChat();
+      chatStatusEl.textContent = "en línea";
+      maybeCompact();
+      if (voiceState.auto && text) speak(text, btn);
+      const userText = lastUserMsg ? (lastUserMsg.text || "") : "";
+      const wantsAudioReq = wantsAudio(userText);
+      if (wantsAudioReq && state.audios.length) {
+        await sendVoiceNote();
+      } else if (wantsPhoto(userText)) {
+        const place = detectPlace(userText);
+        await sendAvatarPhoto(place);
+      }
+    } catch (e) {
+      hideTyping(typingBubble);
+      chatStatusEl.textContent = "en línea";
+      if (span) span.textContent = "No se pudo conectar con la IA: " + (e?.message || "error desconocido");
+    }
+    generating = false;
+    chatStream = null;
+    sendBtn.disabled = false;
+    stopBtn.hidden = true;
+    scrollChat();
+  }
+  function stopGen() {
+    if (chatStream) chatStream.stop();
+  }
+  chatInput.addEventListener("keydown", e => { if (e.key === "Enter") sendMsg(); });
+
+  // ---------- Enviar archivos ----------
+  function onAttach(input) {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const kind = f.type.startsWith("image/") ? "photo" : f.type.startsWith("video/") ? "video" : "audio";
+    pendingMedia = { kind, blob: f, name: f.name };
+    renderPending();
+    input.value = "";
+  }
+  function clearPending() {
+    pendingMedia = null;
+    renderPending();
+  }
+  function renderPending() {
+    pendingBar.hidden = !pendingMedia;
+    if (!pendingMedia) return;
+    if (pendingMedia.kind === "photo") {
+      pendingImg.hidden = false;
+      pendingImg.src = URL.createObjectURL(pendingMedia.blob);
+      pendingName.textContent = "Foto · " + pendingMedia.name;
+    } else {
+      pendingImg.hidden = true;
+      pendingName.textContent = (pendingMedia.kind === "video" ? "🎬 Vídeo · " : "🎵 Audio · ") + pendingMedia.name;
+    }
+  }
+  async function toggleVoiceNote() {
+    if (voiceRec && voiceRec.state !== "inactive") {
+      voiceRec.stop();
+      return;
+    }
+    try {
+      voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      voiceRec = new MediaRecorder(voiceStream);
+      voiceChunks = [];
+      voiceRec.ondataavailable = e => { if (e.data.size) voiceChunks.push(e.data); };
+      voiceRec.onstop = async () => {
+        voiceStream.getTracks().forEach(t => t.stop());
+        clearInterval(voiceTimer);
+        voiceBtn.textContent = "🎤";
+        voiceBtn.classList.remove("rec");
+        voiceBtn.title = "Grabar nota de voz";
+        const blob = new Blob(voiceChunks, { type: voiceRec.mimeType || "audio/webm" });
+        if (voiceChunks.length) {
+          try {
+            const { blob: wav } = await toWav(blob);
+            pendingMedia = { kind: "audio", blob: wav, name: "Mensaje de voz · " + new Date().toLocaleString() };
+            renderPending();
+          } catch (e) {}
+        }
+      };
+      voiceRec.start();
+      voiceSecs = 0;
+      voiceBtn.textContent = "⏹";
+      voiceBtn.classList.add("rec");
+      voiceBtn.title = "0s · toca para detener";
+      voiceTimer = setInterval(() => { voiceSecs++; voiceBtn.title = voiceSecs + "s · toca para detener"; }, 1000);
+    } catch (e) {}
+  }
+
+  let compacting = false;
+  const KEEP = 8;
+  async function maybeCompact() {
+    if (compacting || state.chat.length <= KEEP) return;
+    const meta = root.generateText({ getMetaObject: true });
+    if (meta.countTokens(buildPrompt("")) < meta.idealMaxContextTokens * 0.9) return;
+    compacting = true;
+    try {
+      const n = state.chat.length - KEEP;
+      const boundary = state.chat[n - 1].text.slice(-30);
+      const result = await root.generateText(buildPrompt('Resume los primeros ' + n + ' mensajes de la conversación, deteniéndote después del mensaje que termina con "' + boundary + '". Ten en cuenta el bloque [Resumen...] anterior si existe. Conserva los datos, decisiones y temas sin resolver. Salida SOLO el nuevo resumen, en español, breve.'));
+      state.summary = result.text.trim();
+      state.chat = state.chat.slice(n);
+      saveChat();
+    } catch (e) {}
+    compacting = false;
+  }
+
+  // ---------- Voz ----------
+  let cloningNow = false;
+  function loadVoice() {
+    xiKeyInput.value = voiceState.xiKey;
+    autoCloneChk.checked = voiceState.autoClone;
+    if (voiceState.freeVoice) freeVoiceSelect.value = voiceState.freeVoice;
+    updateAutoBtn();
+    renderXiSamples();
+    populateVoices();
+    setTimeout(() => maybeAutoClone(), 1500);
+  }
+  function saveAutoClone() {
+    voiceState.autoClone = autoCloneChk.checked;
+    saveVoiceData();
+  }
+  function maybeAutoClone() {
+    if (!voiceState.autoClone || cloningNow || voiceState.cloneId) return;
+    if (!voiceState.xiKey) return;
+    if (!voiceState.samples.length) return;
+    cloneVoice();
+  }
+  function toggleAuto() {
+    voiceState.auto = !voiceState.auto;
+    saveVoiceData();
+    updateAutoBtn();
+  }
+  function updateAutoBtn() {
+    autoVoiceBtn.classList.toggle("on", voiceState.auto);
+    autoVoiceBtn.textContent = voiceState.auto ? "🔊" : "🔇";
+    autoVoiceBtn.title = voiceState.auto ? "Voz automática activada" : "Voz automática apagada";
+    autoVoiceToggleBtn.textContent = voiceState.auto ? "🔊 Voz automática: activada" : "🔇 Voz automática: apagada";
+  }
+  function populateVoices() {
+    if (!voiceSelect) return;
+    voiceSelect.innerHTML = "";
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = "(automática — mejor voz en español)";
+    if (!voiceState.browserVoice) opt.selected = true;
+    voiceSelect.appendChild(opt);
+    for (const v of speechSynthesis.getVoices()) {
+      if (!/^es/.test(v.lang)) continue;
+      const o = document.createElement("option");
+      o.value = v.name; o.textContent = v.name + " · " + v.lang;
+      if (v.name === voiceState.browserVoice) o.selected = true;
+      voiceSelect.appendChild(o);
+    }
+    if (voiceState.browserVoice && ![...voiceSelect.options].some(o => o.value === voiceState.browserVoice)) {
+      const o = document.createElement("option");
+      o.value = voiceState.browserVoice; o.textContent = voiceState.browserVoice;
+      o.selected = true;
+      voiceSelect.appendChild(o);
+    }
+  }
+  if (speechSynthesis) speechSynthesis.onvoiceschanged = populateVoices;
+  voiceSelect.onchange = () => { voiceState.browserVoice = voiceSelect.value; saveVoiceData(); };
+  xiKeyInput.addEventListener("change", () => {
+    voiceState.xiKey = xiKeyInput.value.trim();
+    saveVoiceData();
+    maybeAutoClone();
+  });
+
+  function pickVoice() {
+    if (voiceState.browserVoice) {
+      const chosen = speechSynthesis.getVoices().find(v => v.name === voiceState.browserVoice);
+      if (chosen) return chosen;
+    }
+    const vs = speechSynthesis.getVoices();
+    return vs.find(v => /^es/.test(v.lang) && /female|maria|mónica|monica|paulina|sabina/i.test(v.name))
+        || vs.find(v => /^es/.test(v.lang)) || null;
+  }
+  function resetSpeakBtns() {
+    document.querySelectorAll(".msg .speak").forEach(b => { b.textContent = "🔊"; b.classList.remove("on"); });
+  }
+  function stopSpeaking() {
+    speaking = false;
+    if (speechSynthesis) { try { speechSynthesis.cancel(); } catch (e) {} }
+    if (cloneAudioEl) { try { cloneAudioEl.pause(); } catch (e) {} }
+    resetSpeakBtns();
+  }
+  function speak(text, btn) {
+    if (speaking) { stopSpeaking(); return; }
+    if (voiceState.cloneId && voiceState.xiKey) { speakClone(text, btn); return; }
+    if (voiceState.freeVoice) { speakFree(text, btn); return; }
+    speakBrowser(text, btn);
+  }
+  function speakBrowser(text, btn) {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) u.voice = v;
+    u.lang = v ? v.lang : "es-ES";
+    u.rate = 1;
+    const on = () => { speaking = true; if (btn) { btn.textContent = "⏹"; btn.classList.add("on"); } };
+    const off = () => { speaking = false; if (btn) { btn.textContent = "🔊"; btn.classList.remove("on"); } };
+    u.onstart = on;
+    u.onend = u.onerror = off;
+    speechSynthesis.speak(u);
+  }
+  async function speakClone(text, btn) {
+    if (btn) { btn.textContent = "…"; btn.classList.add("on"); }
+    try {
+      const r = await root.superFetch("https://api.elevenlabs.io/v1/text-to-speech/" + encodeURIComponent(voiceState.cloneId) + "?output_format=mp3_44100_128", {
+        method: "POST",
+        headers: { "xi-api-key": voiceState.xiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ text, model_id: "eleven_multilingual_v2" }),
+      });
+      if (!r.ok) throw new Error("error " + r.status);
+      const blob = await r.blob();
+      if (cloneAudioUrl) URL.revokeObjectURL(cloneAudioUrl);
+      cloneAudioUrl = URL.createObjectURL(blob);
+      cloneAudioEl.src = cloneAudioUrl;
+      cloneAudioEl.onended = () => {
+        speaking = false;
+        if (btn) { btn.textContent = "🔊"; btn.classList.remove("on"); }
+      };
+      speaking = true;
+      if (btn) { btn.textContent = "⏹"; btn.classList.add("on"); }
+      cloneAudioEl.play();
+    } catch (e) {
+      speaking = false;
+      if (btn) { btn.textContent = "🔊!"; btn.classList.remove("on"); setTimeout(() => { btn.textContent = "🔊"; }, 3000); }
+    }
+  }
+
+  // ---------- Voz gratuita del avatar (XTTS vía Hugging Face) ----------
+  const FREE_TTS = "https://minsus-voice-cloning-xtts-v2.hf.space";
+  async function freeTtsSynth(text, exampleName) {
+    const data = [text, "", exampleName, "Spanish", 0.75, 1, true, 5, 1, 30, 50, 0.85, true, -45, 300, 100, "Native XTTS splitting", 250, false];
+    const r = await root.superFetch(FREE_TTS + "/gradio_api/call/voice_clone_synthesis", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data }),
+    });
+    const j = await r.json();
+    if (!j.event_id) throw new Error("servicio ocupado");
+    for (let i = 0; i < 70; i++) {
+      await new Promise(r2 => setTimeout(r2, 4000));
+      const s = await root.superFetch(FREE_TTS + "/gradio_api/call/voice_clone_synthesis/" + j.event_id);
+      const t = await s.text();
+      if (t.includes("event: complete")) {
+        const m = t.match(/"url"\s*:\s*"([^"]+)"/);
+        if (m) return m[1];
+        throw new Error("sin audio");
+      }
+      if (t.includes("event: error")) throw new Error("servicio ocupado");
+    }
+    throw new Error("tiempo agotado");
+  }
+  async function playFreeAudio(url, btn) {
+    const blob = await (await root.superFetch(url)).blob();
+    if (cloneAudioUrl) URL.revokeObjectURL(cloneAudioUrl);
+    cloneAudioUrl = URL.createObjectURL(blob);
+    cloneAudioEl.src = cloneAudioUrl;
+    cloneAudioEl.onended = () => {
+      speaking = false;
+      if (btn) { btn.textContent = "🔊"; btn.classList.remove("on"); }
+    };
+    speaking = true;
+    if (btn) { btn.textContent = "⏹"; btn.classList.add("on"); }
+    cloneAudioEl.play();
+  }
+  async function testFreeVoice() {
+    const name = freeVoiceSelect.value;
+    if (!name) { freeVoiceStatus.textContent = "Elige una voz primero."; return; }
+    freeVoiceTestBtn.disabled = true;
+    freeVoiceStatus.textContent = "Generando… tarda ~30 segundos.";
+    try {
+      const url = await freeTtsSynth("Hola, soy yo. Te quiero y estoy en paz, en un lugar lleno de luz.", name);
+      voiceState.freeVoice = name;
+      saveVoiceData();
+      await playFreeAudio(url);
+      freeVoiceStatus.textContent = "¡Voz activada! ✓ El avatar la usará en el chat (cada mensaje tarda ~30s).";
+    } catch (e) {
+      freeVoiceStatus.textContent = "El servicio gratuito está ocupado ahora mismo. Inténtalo en un momento.";
+    }
+    freeVoiceTestBtn.disabled = false;
+  }
+  freeVoiceSelect.onchange = () => {
+    if (freeVoiceSelect.value) {
+      freeVoiceStatus.textContent = "Pulsa «Probar voz» para escucharla y activarla.";
+    } else {
+      voiceState.freeVoice = "";
+      saveVoiceData();
+      freeVoiceStatus.textContent = "";
+    }
+  };
+  async function speakFree(text, btn) {
+    if (btn) { btn.textContent = "…"; btn.classList.add("on"); }
+    try {
+      const url = await freeTtsSynth(text, voiceState.freeVoice);
+      await playFreeAudio(url, btn);
+    } catch (e) {
+      if (btn) { btn.textContent = "🔊!"; btn.classList.remove("on"); setTimeout(() => { btn.textContent = "🔊"; }, 3000); }
+      speakBrowser(text, btn);
+    }
+  }
+
+  // ---------- Clon de voz (ElevenLabs) ----------
+  function renderXiSamples() {
+    xiSampleList.innerHTML = "";
+    if (!voiceState.samples.length) {
+      xiSampleList.innerHTML = '<li class="dim">Aún no hay muestras.</li>';
+      return;
+    }
+    let total = 0;
+    for (const [i, s] of voiceState.samples.entries()) {
+      total += s.seconds || 0;
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.textContent = (s.seconds ? Math.round(s.seconds) + "s · " : "") + s.name;
+      const del = document.createElement("button"); del.className = "x"; del.textContent = "✕";
+      del.onclick = () => { const s = voiceState.samples[i]; if (s && s.savedKey) db.delete(s.savedKey).catch(() => {}); voiceState.samples.splice(i, 1); saveVoiceData(); renderXiSamples(); };
+      li.appendChild(name); li.appendChild(del);
+      xiSampleList.appendChild(li);
+    }
+    xiStatus.textContent = "Total de audio: ~" + Math.round(total) + "s" + (total < 60 ? " (se recomienda al menos 60s)" : " ✓") + (voiceState.cloneId ? " · Voz clonada lista ✓" : "");
+  }
+  function toWav(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = reject;
+      fr.onload = async () => {
+        try {
+          const ac = new (window.AudioContext || window.webkitAudioContext)();
+          const audio = await ac.decodeAudioData(fr.result);
+          const sr = 22050;
+          const off = new OfflineAudioContext(1, Math.ceil(audio.duration * sr), sr);
+          const src = off.createBufferSource();
+          src.buffer = audio; src.connect(off.destination); src.start(0);
+          const rendered = await off.startRendering();
+          const ch = rendered.getChannelData(0);
+          const out = new Int16Array(ch.length);
+          for (let i = 0; i < ch.length; i++) {
+            const s = Math.max(-1, Math.min(1, ch[i]));
+            out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          const dv = new DataView(new ArrayBuffer(44 + out.length * 2));
+          const w = (off2, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(off2 + i, str.charCodeAt(i)); };
+          w(0, "RIFF"); dv.setUint32(4, 36 + out.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+          dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+          dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+          w(36, "data"); dv.setUint32(40, out.length * 2, true);
+          for (let i = 0; i < out.length; i++) dv.setInt16(44 + i * 2, out[i], true);
+          ac.close();
+          resolve({ blob: new Blob([dv], { type: "audio/wav" }), seconds: audio.duration });
+        } catch (e) { reject(e); }
+      };
+      fr.readAsArrayBuffer(blob);
+    });
+  }
+  function loadLame() {
+    return new Promise((resolve, reject) => {
+      if (window.lamejs) return resolve(window.lamejs);
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js";
+      s.onload = () => resolve(window.lamejs);
+      s.onerror = () => reject(new Error("no lamejs"));
+      document.head.appendChild(s);
+    });
+  }
+  async function toMp3(wavBlob) {
+    const lame = await loadLame();
+    const fr = new FileReader();
+    fr.readAsArrayBuffer(wavBlob);
+    await new Promise((res, rej) => { fr.onload = res; fr.onerror = rej; });
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const audio = await ac.decodeAudioData(fr.result);
+    const ch = audio.getChannelData(0);
+    const sr = audio.sampleRate;
+    const enc = new lame.Mp3Encoder(1, sr, 96);
+    const buf = new Int16Array(ch.length);
+    for (let i = 0; i < ch.length; i++) buf[i] = Math.max(-1, Math.min(1, ch[i])) * 0x7FFF;
+    const chunks = [];
+    const block = 1152;
+    for (let i = 0; i < buf.length; i += block) {
+      const c = enc.encodeBuffer(buf.subarray(i, i + block));
+      if (c.length) chunks.push(new Uint8Array(c));
+    }
+    const end = enc.flush();
+    if (end.length) chunks.push(new Uint8Array(end));
+    ac.close();
+    const total = chunks.reduce((a, b) => a + b.length, 0);
+    const merged = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    return new Blob([merged], { type: "audio/mp3" });
+  }
+  async function packSample(wavBlob, seconds, name) {
+    if (wavBlob.size > 4.5 * 1024 * 1024) {
+      const mp3 = await toMp3(wavBlob);
+      return { blob: mp3, name: name.replace(/\.wav$/i, ".mp3") };
+    }
+    return { blob: wavBlob, name };
+  }
+  async function onXiUpload(input) {
+    const files = input.files;
+    if (!files || !files.length) return;
+    xiRecStatus.hidden = false;
+    xiRecStatus.textContent = "Convirtiendo audio…";
+    for (const f of files) {
+      try {
+        const { blob, seconds } = await toWav(f);
+        xiRecStatus.textContent = "Comprimiendo audio…";
+        const packed = await packSample(blob, seconds, (f.name || "muestra") + ".wav");
+        voiceState.samples.push({ name: packed.name, blob: packed.blob, seconds });
+        await saveVoiceData();
+      } catch (e) {
+        xiRecStatus.textContent = "No se pudo leer: " + f.name;
+      }
+    }
+    input.value = "";
+    xiRecStatus.hidden = true;
+    renderXiSamples();
+    maybeAutoClone();
+  }
+  async function toggleXiRecord() {
+    if (xiRecorder && xiRecorder.state !== "inactive") {
+      xiRecorder.stop();
+      return;
+    }
+    try {
+      xiRecStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      xiRecorder = new MediaRecorder(xiRecStream);
+      xiRecChunks = [];
+      xiRecorder.ondataavailable = e => { if (e.data.size) xiRecChunks.push(e.data); };
+      xiRecorder.onstop = async () => {
+        xiRecStream.getTracks().forEach(t => t.stop());
+        clearInterval(xiRecTimer);
+        xiRecStatus.hidden = false;
+        xiRecStatus.textContent = "Guardando grabación…";
+        const blob = new Blob(xiRecChunks, { type: xiRecorder.mimeType || "audio/webm" });
+        if (xiRecChunks.length) {
+          try {
+            const { blob: wav, seconds } = await toWav(blob);
+            xiRecStatus.textContent = "Comprimiendo audio…";
+            const packed = await packSample(wav, seconds, "Grabación · " + new Date().toLocaleString() + ".wav");
+            voiceState.samples.push({ name: packed.name, blob: packed.blob, seconds });
+            await saveVoiceData();
+            renderXiSamples();
+          } catch (e) {
+            xiRecStatus.textContent = "No se pudo convertir la grabación.";
+          }
+        }
+        xiRecBtn.textContent = "⏺ Grabar";
+        xiRecStatus.hidden = true;
+        maybeAutoClone();
+      };
+      xiRecorder.start();
+      xiRecSeconds = 0;
+      xiRecBtn.textContent = "⏹ Detener";
+      xiRecStatus.hidden = false;
+      xiRecStatus.textContent = "Grabando… 0s";
+      xiRecTimer = setInterval(() => { xiRecSeconds++; xiRecStatus.textContent = "Grabando… " + xiRecSeconds + "s"; }, 1000);
+    } catch (e) {
+      xiRecStatus.hidden = false;
+      xiRecStatus.textContent = "No se pudo acceder al micrófono.";
+    }
+  }
+  async function cloneVoice() {
+    const key = voiceState.xiKey;
+    if (!key) { xiStatus.textContent = "Introduce tu clave de API de ElevenLabs primero."; return; }
+    if (!voiceState.samples.length) { xiStatus.textContent = "Sube o graba al menos una muestra de voz."; return; }
+    cloningNow = true;
+    cloneBtn.disabled = true;
+    xiStatus.textContent = "Creando el clon de voz… puede tardar hasta un minuto.";
+    try {
+      const fd = new FormData();
+      fd.append("name", "Recuerdo de " + (state.profile.name.trim() || "un ser querido"));
+      for (const s of voiceState.samples) fd.append("files", s.blob, s.name);
+      const r = await root.superFetch("https://api.elevenlabs.io/v1/voices/add", {
+        method: "POST",
+        headers: { "xi-api-key": key },
+        body: fd,
+      });
+      const j = await r.json();
+      if (!j.voice_id) throw new Error((j.detail && j.detail.message) || JSON.stringify(j).slice(0, 200));
+      voiceState.cloneId = j.voice_id;
+      saveVoiceData();
+      xiStatus.textContent = "¡Voz clonada! Ya habla con su propia voz en el chat. 🔊";
+    } catch (e) {
+      xiStatus.textContent = "Fallo al clonar: " + e.message + " (comprueba la clave y que tu plan permita clonar).";
+    }
+    cloningNow = false;
+    cloneBtn.disabled = false;
+    renderXiSamples();
+  }
+
+  // ---------- Navegación ----------
+  function showTab(id) {
+    const isChat = id === "chat";
+    const isContact = id === "contact";
+    appHeader.hidden = isChat || isContact;
+    chatHeader.hidden = id !== "chat";
+    contactHeader.hidden = id !== "contact";
+    bottomNav.hidden = isChat || isContact;
+    for (const t of ["profile", "media", "voice", "chat"]) {
+      document.getElementById("tab-" + t).hidden = (t !== id);
+      document.getElementById("bn-" + t).classList.toggle("active", t === id);
+    }
+    if (id !== "contact") document.getElementById("tab-contact").hidden = true;
+    if (id === "contact") document.getElementById("tab-contact").hidden = false;
+    if (isChat) scrollChat();
+  }
+
+  init();
+</script>
+
+<style>
+  html { color-scheme: light; }
+  body {
+    text-align: left;
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Helvetica Neue", Segoe UI, Arial, sans-serif;
+    background: #0b141a;
+    display: flex;
+    justify-content: center;
+    align-items: stretch;
+  }
+  #appFrame {
+    width: 100%;
+    max-width: 480px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #f0f2f5;
+    box-shadow: 0 0 60px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+
+  /* Headers */
+  .wa-header { background: #008069; color: #fff; display: flex; align-items: center; gap: .5em; padding: .6em .8em; flex-shrink: 0; }
+  .wa-header .t { font-size: 1.05rem; font-weight: 600; flex: 1; }
+  .h-icon { background: none; border: none; color: #fff; font-size: 1.05rem; cursor: pointer; padding: .1em .3em; }
+  .h-icon.on { color: #25d366; }
+  #chatHeader .avatar { cursor: zoom-in; }
+  #chatHeader .back { background: none; border: none; color: #fff; font-size: 1.6rem; line-height: 1; cursor: pointer; padding: 0 .15em; }
+  #chatHeader .avatar {
+    width: 40px; height: 40px; border-radius: 50%; background: #e9edef;
+    object-fit: cover; display: flex; align-items: center; justify-content: center;
+    font-size: 1.2rem; flex-shrink: 0; overflow: hidden;
+  }
+  .h-info { flex: 1; min-width: 0; cursor: pointer; }
+  .h-name { font-weight: 600; font-size: .95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .h-status { font-size: .72rem; color: #25d366; }
+
+  /* Screens */
+  .panel { flex: 1; overflow-y: auto; background: #f0f2f5; }
+  .pad { padding: 1em; }
+  .dim { color: #667781; font-size: .82rem; font-style: italic; }
+  .note { color: #008069; font-size: .85rem; margin: .5em 0 0; }
+  .section-head {
+    background: #fff;
+    color: #00a884;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .4px;
+    text-transform: uppercase;
+    padding: .75em 1em;
+    border-bottom: 1px solid #e9edef;
+  }
+
+  /* WhatsApp list rows */
+  .wa-row {
+    background: #fff;
+    border-bottom: 1px solid #e9edef;
+    padding: .55em 1em;
+    display: flex;
+    flex-direction: column;
+    gap: .1em;
+  }
+  .wa-row label { font-size: .78rem; color: #008069; font-weight: 600; }
+  .wa-row input, .wa-row textarea, .wa-row select {
+    border: none; outline: none; background: transparent;
+    font: inherit; font-size: .98rem; color: #111b21;
+    padding: .15em 0; width: 100%; resize: vertical;
+  }
+  .wa-row select { appearance: none; background: transparent; }
+  .tog-row { display: flex; align-items: center; gap: .5em; font-size: .92rem; color: #111b21; cursor: pointer; }
+  .tog-row input { width: 1.1em; height: 1.1em; accent-color: #008069; }
+  .add-row { display: flex; gap: .5em; align-items: center; width: 100%; }
+  .add-row input { flex: 1; }
+  .row-btns { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; }
+
+  ul.wa-list { list-style: none; margin: 0; padding: 0; }
+  ul.wa-list li {
+    display: flex; justify-content: space-between; align-items: center; gap: .6em;
+    background: #fff; padding: .6em 1em; border-bottom: 1px solid #e9edef;
+    color: #111b21; font-size: .95rem;
+  }
+  .x { background: none; border: none; color: #8b9aa1; font-size: 1rem; cursor: pointer; padding: 0 .2em; }
+  .dim.small { font-size: .78rem; }
+  .shots-grid { display: flex; flex-wrap: wrap; gap: .5em; margin-top: .5em; }
+  .shots-grid .shot { position: relative; width: 84px; height: 84px; }
+  .shots-grid .shot img { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; cursor: zoom-in; display: block; }
+  .shots-grid .shot .x {
+    position: absolute; top: -8px; right: -8px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #fff; border: 1px solid #e9edef; color: #d9534f;
+    font-size: .7rem; line-height: 1; cursor: pointer;
+  }
+
+  /* Buttons */
+  button { font-family: inherit; }
+  .primary { background: #008069; color: #fff; border: none; border-radius: 999px; padding: .75em 1.6em; font-weight: 600; font-size: .95rem; cursor: pointer; }
+  .primary:disabled { background: #9fc6c0; cursor: default; }
+  .primary.full { width: 100%; }
+  .small {
+    background: #fff; color: #008069; border: 1px solid #008069;
+    border-radius: 999px; padding: .35em 1.1em; font-size: .82rem; font-weight: 600; cursor: pointer;
+  }
+  .small:hover { background: #e7f6f4; }
+
+  /* Profile */
+  .contact-top { background: #fff; border-bottom: 1px solid #e9edef; padding: 1.2em 1em .6em; text-align: center; }
+  .c-name { font-size: 1.15rem; font-weight: 600; margin-top: .8em; color: #111b21; }
+  .value { font-size: .98rem; color: #111b21; padding: .15em 0; }
+  .media-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: #fff; padding: .8em 1em; border-bottom: 1px solid #e9edef; cursor: pointer;
+  }
+  .media-row .m-title { font-size: .98rem; color: #111b21; }
+  .media-row .m-count { font-size: .78rem; color: #667781; }
+  .media-row .arrow { color: #8696a0; font-size: 1.2rem; }
+  #contactPhotoGrid img { width: 100%; height: 100px; object-fit: cover; border-radius: 8px; cursor: zoom-in; }
+  .grid-empty { margin: 0; padding: .8em; text-align: center; }
+  .profile-top { background: #fff; border-bottom: 1px solid #e9edef; padding: 1.2em 1em .6em; text-align: center; }
+  .avatar-big {
+    position: relative; display: block; width: 130px; height: 130px; margin: 0 auto;
+    border-radius: 50%; background: #e9edef; cursor: pointer; overflow: hidden;
+  }
+  .avatar-big img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .avatar-big .ph { display: flex; align-items: center; justify-content: center; height: 100%; color: #667781; font-size: .85rem; padding: 0 1.2em; }
+  .avatar-big .badge {
+    position: absolute; right: -4px; bottom: 6px; width: 36px; height: 36px;
+    background: #25d366; border: 3px solid #fff; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 1rem;
+  }
+
+  /* Media */
+  .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: .5em; padding: .8em; }
+  .media-item { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 2px rgba(11,20,26,.08); margin: .5em .8em; }
+  .media-grid .media-item { margin: 0; }
+  .media-item img { width: 100%; height: 110px; object-fit: cover; display: block; }
+  .media-item video { width: 100%; display: block; max-height: 240px; }
+  .media-item audio { width: 100%; display: block; }
+  .media-item .cap { display: flex; justify-content: space-between; align-items: center; padding: .5em .8em; font-size: .85rem; color: #667781; }
+
+  /* Chat */
+  .chat-panel { display: flex; flex-direction: column; overflow: hidden; }
+  .chat-banner {
+    background: #fff3cd; color: #664d03; font-size: .72rem; text-align: center;
+    padding: .4em .6em; border-bottom: 1px solid #ffe69c; flex-shrink: 0;
+  }
+  .chatarea {
+    flex: 1; overflow-y: auto; padding: .6em .7em;
+    display: flex; flex-direction: column;
+    background-color: #efeae2;
+    background-image: url("https://user.uploads.dev/file/c9958c3d154c690df84baddaaee4fc3d.png");
+    background-size: 380px auto;
+    background-repeat: repeat;
+  }
+  .chip {
+    align-self: center; background: #fff; color: #54656f; font-size: .75rem;
+    padding: .3em 1em; border-radius: 8px; box-shadow: 0 1px 1px rgba(0,0,0,.12); margin: .6em 0; text-align: center;
+  }
+  .msg { display: flex; margin: .3em 0; }
+  .msg.out { justify-content: flex-end; }
+  .bubble { max-width: 80%; position: relative; }
+  .msg.in .bubble { background: #fff; border-radius: 0 8px 8px 8px; }
+  .msg.out .bubble { background: #d9fdd3; border-radius: 8px 0 8px 8px; }
+  .msg.in .bubble::before {
+    content: ""; position: absolute; top: 0; left: -8px;
+    width: 0; height: 0; border-style: solid;
+    border-width: 0 8px 8px 0; border-color: transparent #fff transparent transparent;
+  }
+  .msg.out .bubble::before {
+    content: ""; position: absolute; top: 0; right: -8px;
+    width: 0; height: 0; border-style: solid;
+    border-width: 8px 0 0 8px; border-color: transparent transparent transparent #d9fdd3;
+  }
+  .bubble .inner { padding: .5em .75em .35em; position: relative; }
+  .bubble .who { display: block; font-size: .76rem; color: #008069; margin-bottom: .1em; }
+  .bubble .txt { white-space: pre-wrap; color: #111b21; line-height: 1.5; font-size: .92rem; display: block; margin-right: 2.6em; }
+  .bubble .meta {
+    position: absolute; bottom: .3em; right: .5em;
+    font-size: .64rem; color: #8696a0; display: flex; align-items: center; gap: .15em;
+  }
+  .ticks { color: #53bdeb; }
+  .msg .speak {
+    border: none; background: none; color: #8696a0; font-size: .8rem; padding: .15em 0;
+    cursor: pointer; display: block; margin-top: .05em;
+  }
+  .msg .speak.on { color: #008069; }
+  .msg-media { max-width: 100%; max-height: 220px; border-radius: 6px; display: block; cursor: zoom-in; margin-bottom: .2em; }
+  .msg-audio { max-width: 100%; width: 210px; height: 40px; display: block; margin-bottom: .2em; }
+  .msg-video { max-width: 100%; max-height: 240px; border-radius: 6px; display: block; margin-bottom: .2em; }
+  .msg.in .bubble .msg-media, .msg.in .bubble .msg-video, .msg.in .bubble .msg-audio { background: #f0f2f5; border-radius: 6px; }
+  .voicenote { display: flex; align-items: center; gap: .6em; min-width: 220px; max-width: 260px; }
+  .vn-audio { display: none; }
+  .vn-play { width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer; flex-shrink: 0; background: #008069; color: #fff; font-size: .8rem; }
+  .msg.in .voicenote .vn-play { background: #f0f2f5; color: #008069; }
+  .vn-bars { display: flex; align-items: center; gap: 2px; height: 26px; flex: 1; }
+  .vn-bars span { width: 3px; background: #8696a0; border-radius: 2px; }
+  .vn-bars.playing span { background: #008069; animation: vnwave 1s ease-in-out infinite; }
+  @keyframes vnwave { 0%, 100% { transform: scaleY(.6); } 50% { transform: scaleY(1.15); } }
+  .vn-dur { font-size: .68rem; color: #8696a0; white-space: nowrap; }
+
+  .typing-msg { margin: .3em 0; }
+  .typing-msg .bubble { display: flex; gap: 4px; padding: 12px 14px; }
+  .typing-msg .dot { width: 7px; height: 7px; background: #a7b0b8; border-radius: 50%; animation: blink 1.2s infinite; }
+  .typing-msg .dot:nth-child(2) { animation-delay: .2s; }
+  .typing-msg .dot:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+  .chat-input { background: #f0f2f5; display: flex; align-items: center; gap: .5em; padding: .55em .7em; flex-shrink: 0; }
+  .chat-input .ic { color: #8696a0; font-size: 1.2rem; }
+  .ico-btn { background: none; border: none; color: #8696a0; font-size: 1.25rem; cursor: pointer; padding: .15em .2em; flex-shrink: 0; }
+  .ico-btn.rec { color: #d9534f; }
+  .pending {
+    display: flex; align-items: center; gap: .6em;
+    background: #fff; margin: .5em .7em 0; padding: .5em .8em;
+    border-radius: 12px; box-shadow: 0 1px 2px rgba(11,20,26,.1); flex-shrink: 0;
+  }
+  .pending img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; }
+  .pending .pname { flex: 1; font-size: .85rem; color: #111b21; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #chatInput {
+    flex: 1; border: none; outline: none; border-radius: 999px;
+    padding: .6em 1em; font: inherit; font-size: .95rem; background: #fff; color: #111b21;
+  }
+  .send { width: 46px; height: 46px; border-radius: 50%; border: none; background: #008069; color: #fff; font-size: 1rem; cursor: pointer; flex-shrink: 0; }
+  .send:disabled { background: #c8d5d3; }
+  .stop { width: 46px; height: 46px; border-radius: 50%; border: none; background: #d9534f; color: #fff; font-size: .95rem; cursor: pointer; flex-shrink: 0; }
+
+  /* Bottom nav */
+  #bottomNav { display: flex; background: #fff; border-top: 1px solid #e9edef; flex-shrink: 0; }  #bottomNav button {
+    flex: 1; border: none; background: none; border-top: 3px solid transparent;
+    color: #8696a0; font-size: .66rem; font-weight: 600; padding: .45em 0 .4em;
+    cursor: pointer; display: flex; flex-direction: column; gap: .1em; align-items: center;
+  }
+  #bottomNav button .ic { font-size: 1.35rem; line-height: 1; }
+  #bottomNav button.active { color: #008069; border-top-color: #25d366; }
+
+  /* Lightbox */
+  .lightbox {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(0,0,0,.88);
+    display: flex; align-items: center; justify-content: center;
+    cursor: zoom-out;
+  }
+  .lightbox img { max-width: 92%; max-height: 92%; border-radius: 10px; box-shadow: 0 10px 40px rgba(0,0,0,.6); }
+  .lb-close {
+    position: absolute; top: 1.1em; right: 1.2em;
+    width: 42px; height: 42px; border-radius: 50%;
+    background: rgba(255,255,255,.16); border: none; color: #fff;
+    font-size: 1.15rem; cursor: pointer;
+  }
+
+</style>
+
+</body>
+</html>
