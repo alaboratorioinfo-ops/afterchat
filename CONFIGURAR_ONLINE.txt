@@ -1,0 +1,12 @@
+AFTERCHAT 0.5 — IA ONLINE GRATIS
+
+La aplicación usa este Worker de Cloudflare como intermediario seguro:
+https://afterchat-api.alaboratorioinfo.workers.dev/
+
+El Worker guarda OPENROUTER_API_KEY como Secret y llama a OpenRouter.
+El frontend NO contiene la clave API.
+
+Modelo configurado en el Worker:
+openrouter/free
+
+No necesitas configurar Hugging Face para el chat.
