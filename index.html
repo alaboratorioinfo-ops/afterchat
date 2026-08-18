@@ -48,9 +48,41 @@
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
     });
+  }
+async function typeNatural(element, text) {
+  const words = text.split(/\s+/).filter(Boolean);
 
+  element.textContent = "";
 
-    
+  let position = 0;
+
+  while (position < words.length) {
+    const groupSize = Math.min(
+      Math.floor(Math.random() * 4) + 2,
+      words.length - position
+    );
+
+    const group = words
+      .slice(position, position + groupSize)
+      .join(" ");
+
+    element.textContent +=
+      (element.textContent ? " " : "") + group;
+
+    position += groupSize;
+
+    let delay = 120 + Math.random() * 180;
+
+    if (/[.!?]$/.test(group)) {
+      delay += 350 + Math.random() * 400;
+    } else if (/[,;:]$/.test(group)) {
+      delay += 150 + Math.random() * 200;
+    }
+
+    await new Promise(resolve =>
+      setTimeout(resolve, delay)
+    );
+  }
 }  async function kvDelete(key) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
