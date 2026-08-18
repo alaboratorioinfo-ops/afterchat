@@ -1178,7 +1178,7 @@ async function typeNatural(element, text) {
       hideTyping(typingBubble);
       const appended = appendMsg("bot", "");
       span = appended.span; btn = appended.btn;
-      span.textContent = text;
+      await typeNatural(span, text);      
       state.chat.push({ role: "bot", text });
       saveChat();
       chatStatusEl.textContent = "en línea";
