@@ -70,18 +70,7 @@
 
     position += groupSize;
 
-    let delay = 120 + Math.random() * 180;
-
-    if (/[.!?]$/.test(group)) {
-      delay += 350 + Math.random() * 400;
-    } else if (/[,;:]$/.test(group)) {
-      delay += 150 + Math.random() * 200;
-    }
-
-    await new Promise(resolve =>
-      setTimeout(resolve, delay)
-    );
-  }
+    
 }  async function kvDelete(key) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
