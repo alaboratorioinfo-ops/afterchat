@@ -48,27 +48,7 @@
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
     });
-  }
-  const words = text.split(/\s+/).filter(Boolean);
 
-  element.textContent = "";
-
-  let position = 0;
-
-  while (position < words.length) {
-    const groupSize = Math.min(
-      Math.floor(Math.random() * 4) + 2,
-      words.length - position
-    );
-
-    const group = words
-      .slice(position, position + groupSize)
-      .join(" ");
-
-    element.textContent +=
-      (element.textContent ? " " : "") + group;
-
-    position += groupSize;
 
     
 }  async function kvDelete(key) {
